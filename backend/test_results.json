@@ -1,0 +1,209 @@
+{
+  "total_tests": 20,
+  "passed": 20,
+  "failed": 0,
+  "pass_rate": "100.0%",
+  "executed_at": "2026-11-20T12:34:32.508805+00:00",
+  "tests": [
+    {
+      "id": "TC-01",
+      "title": "User Registration (Valid Data)",
+      "category": "Authentication",
+      "description": "Register a new user account with unique username, email and password",
+      "expected": "HTTP 200, user created with role='user'",
+      "actual": "HTTP 200, User 'tester_e77bd2', Role 'user'",
+      "status": "PASS",
+      "duration_ms": 1015.92
+    },
+    {
+      "id": "TC-02",
+      "title": "Duplicate Username Registration",
+      "category": "Security / Validation",
+      "description": "Attempt to register with an existing username to verify collision handling",
+      "expected": "HTTP 400 Bad Request with 'Username already taken' error",
+      "actual": "HTTP 400, Error: 'Username already taken'",
+      "status": "PASS",
+      "duration_ms": 13.24
+    },
+    {
+      "id": "TC-03",
+      "title": "User Login (Valid Credentials)",
+      "category": "Authentication",
+      "description": "Authenticate registered user with correct username and password",
+      "expected": "HTTP 200 OK with authenticated user session & profile",
+      "actual": "HTTP 200, Authenticated as: 'tester_e77bd2'",
+      "status": "PASS",
+      "duration_ms": 692.88
+    },
+    {
+      "id": "TC-04",
+      "title": "User Login (Invalid Password)",
+      "category": "Security",
+      "description": "Attempt authentication with incorrect password",
+      "expected": "HTTP 401 Unauthorized with 'Invalid username or password'",
+      "actual": "HTTP 401, Error: 'Invalid username or password'",
+      "status": "PASS",
+      "duration_ms": 667.99
+    },
+    {
+      "id": "TC-05",
+      "title": "RBAC Role State Switching",
+      "category": "Authorization",
+      "description": "Switch system context dynamically between Admin, Guest, and User",
+      "expected": "Role permissions correctly set to admin, guest, and user respectively",
+      "actual": "Admin: admin, Guest: guest, User: user",
+      "status": "PASS",
+      "duration_ms": 145.49
+    },
+    {
+      "id": "TC-06",
+      "title": "Event Catalog Retrieval",
+      "category": "Discovery",
+      "description": "Fetch all active events with nested ticket tiers",
+      "expected": "HTTP 200 with all seeded events including Neon Nights & Anime Expo",
+      "actual": "HTTP 200, Returned 7 events",
+      "status": "PASS",
+      "duration_ms": 33.25
+    },
+    {
+      "id": "TC-07",
+      "title": "Category-Based Filtering",
+      "category": "Discovery",
+      "description": "Filter event catalog for category='concerts'",
+      "expected": "Only concert category events returned in dataset",
+      "actual": "HTTP 200, Filtered 1 concert(s)",
+      "status": "PASS",
+      "duration_ms": 8.17
+    },
+    {
+      "id": "TC-08",
+      "title": "Full-Text Event Search",
+      "category": "Discovery",
+      "description": "Search events with keyword 'Neon'",
+      "expected": "Matched events containing 'Neon' in title/venue",
+      "actual": "HTTP 200, Matches: ['Neon Nights Concert']",
+      "status": "PASS",
+      "duration_ms": 8.0
+    },
+    {
+      "id": "TC-09",
+      "title": "Price Sorting (Ascending)",
+      "category": "Discovery",
+      "description": "Sort catalog by price_low parameter",
+      "expected": "Events ordered in ascending starting_price order",
+      "actual": "Prices: [399.0, 499.0, 699.0, 899.0]... is_sorted: True",
+      "status": "PASS",
+      "duration_ms": 13.0
+    },
+    {
+      "id": "TC-10",
+      "title": "Event Details & Tier Breakdown",
+      "category": "Discovery",
+      "description": "Retrieve single event by ID with all ticket categories and quotas",
+      "expected": "HTTP 200 with ticket tiers, venue, starting price, and description",
+      "actual": "HTTP 200, Tiers count: 3",
+      "status": "PASS",
+      "duration_ms": 7.0
+    },
+    {
+      "id": "TC-11",
+      "title": "10-Minute Hold Reservation",
+      "category": "Inventory / Concurrency",
+      "description": "Create temporary hold reservation for 2 tickets with 10-minute expiry",
+      "expected": "HTTP 200, hold created with 600 seconds remaining countdown",
+      "actual": "HTTP 200, Seconds: 600, Hold IDs: 1",
+      "status": "PASS",
+      "duration_ms": 18.0
+    },
+    {
+      "id": "TC-12",
+      "title": "Excessive Hold Quantity Rejection",
+      "category": "Validation",
+      "description": "Attempt to hold quantity exceeding category total quota (99,999 tickets)",
+      "expected": "HTTP 400 Bad Request with availability boundary error",
+      "actual": "HTTP 400, Error: 'Only 248 tickets available for Standard Admission'",
+      "status": "PASS",
+      "duration_ms": 6.59
+    },
+    {
+      "id": "TC-13",
+      "title": "Database Hold State Persistence",
+      "category": "Data Integrity",
+      "description": "Verify hold record persisted in TicketHold table with expiry timestamp",
+      "expected": "Hold record exists in database and is_expired() is False",
+      "actual": "Persisted holds count: 1, Expiry valid",
+      "status": "PASS",
+      "duration_ms": 0.51
+    },
+    {
+      "id": "TC-14",
+      "title": "Booking Confirmation & QR Ticket",
+      "category": "Booking & Payment",
+      "description": "Execute checkout with UPI payment simulation and generate confirmed e-ticket",
+      "expected": "HTTP 201 Created, status='CONFIRMED', reference starts with 'EVX-2026-', QR generated",
+      "actual": "HTTP 201, Ref: EVX-2026-DMBLG, QR: EVENTIX-TICKET|REF:EVX-2026-DMBLG|E...",
+      "status": "PASS",
+      "duration_ms": 26.26
+    },
+    {
+      "id": "TC-15",
+      "title": "Missing Attendee Email Rejection",
+      "category": "Validation",
+      "description": "Attempt to book without providing mandatory attendee email",
+      "expected": "HTTP 400 Bad Request with validation error",
+      "actual": "HTTP 400, Error: 'Event, items, and valid email are required'",
+      "status": "PASS",
+      "duration_ms": 3.0
+    },
+    {
+      "id": "TC-16",
+      "title": "Atomic Inventory Quota Decrement",
+      "category": "Data Consistency",
+      "description": "Verify available_quota reduced by exactly booked ticket quantity",
+      "expected": "Quota decremented by 2",
+      "actual": "Initial: 250, Current: 248, Decremented: 2",
+      "status": "PASS",
+      "duration_ms": 0.0
+    },
+    {
+      "id": "TC-17",
+      "title": "Booking Cancellation & 100% Refund",
+      "category": "Cancellations",
+      "description": "Cancel confirmed booking and process 100% refund",
+      "expected": "HTTP 200, status='CANCELLED', refund_amount equals total_amount",
+      "actual": "HTTP 200, Status: CANCELLED, Refund: \u20b91998.00",
+      "status": "PASS",
+      "duration_ms": 27.66
+    },
+    {
+      "id": "TC-18",
+      "title": "Inventory Quota Restoration",
+      "category": "Data Consistency",
+      "description": "Verify ticket quota restored back to pre-booking quantity upon cancellation",
+      "expected": "Available quota restored to 250",
+      "actual": "Restored available quota: 250 (matches pre-booking: 250)",
+      "status": "PASS",
+      "duration_ms": 2.0
+    },
+    {
+      "id": "TC-19",
+      "title": "Admin Dashboard Analytics",
+      "category": "Admin & Reporting",
+      "description": "Fetch administrative KPIs including revenue, total bookings, active events",
+      "expected": "HTTP 200 with total_revenue, total_bookings, active_events",
+      "actual": "HTTP 200, Active Events: 7, Bookings: 3",
+      "status": "PASS",
+      "duration_ms": 23.4
+    },
+    {
+      "id": "TC-20",
+      "title": "AI Assistant Enquiry & Action Binding",
+      "category": "AI Concierge",
+      "description": "Inquire ticket price for Neon Nights Concert via assistant",
+      "expected": "HTTP 200, response mentions 'starts from \u20b9999' with action_type='book_event'",
+      "actual": "Reply: 'The ticket price for Neon Nights Concert starts from \u20b9999. Would you like to book now?', Action: 'book_event'",
+      "status": "PASS",
+      "duration_ms": 7928.3
+    }
+  ]
+}
