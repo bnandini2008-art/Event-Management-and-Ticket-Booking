@@ -127,11 +127,11 @@ export function EventixAssistant({
 
       setMessages((prev) => [...prev, botMsg]);
     } catch (err) {
-      // Fallback response
+      console.error('Eventix Assistant error:', err);
       const botMsg = {
         id: 'bot-' + Date.now(),
         sender: 'assistant',
-        text: "I'm here to help with all event bookings and inquiries. How can I assist you further?",
+        text: "⚠️ Connection error. Please verify the server is running and try again.",
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
       setMessages((prev) => [...prev, botMsg]);
