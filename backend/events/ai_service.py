@@ -3,7 +3,7 @@ import re
 import json
 import warnings
 from django.utils import timezone
-from .models import Event, TicketCategory
+from .models import Event, TicketCategory, ChatMessage
 
 # Configure Gemini API Key from environment or .env file (excluded from git)
 def _load_api_key():
@@ -35,7 +35,7 @@ def format_price(amount):
         if val.is_integer():
             return f"₹{int(val):,}"
         return f"₹{val:,.2f}"
-    except:
+    except Exception:
         return f"₹{amount}"
 
 def get_events_context():
@@ -61,64 +61,101 @@ def get_events_context():
             "venue": ev.venue,
             "city": ev.city,
             "date": ev.start_date.strftime("%b %d, %Y at %I:%M %p"),
+            "end_date": ev.end_date.strftime("%b %d, %Y at %I:%M %p") if ev.end_date else None,
             "starting_price": format_price(ev.starting_price),
             "starting_price_num": float(ev.starting_price),
             "description": ev.description,
             "tiers": tiers_list,
-            "tiers_str": ", ".join([f"{t['name']}: {t['price']} ({t['quota']} left)" for t in tiers_list])
+            "tiers_str": ", ".join([f"{t['name']}: {t['price']} ({t['quota']} seats left)" for t in tiers_list])
         })
     return data
 
+def find_context_event(session_id, events):
+    """Inspects recent messages in the session to identify the active event context."""
+    if not session_id:
+        return None
+    try:
+        recent_msgs = ChatMessage.objects.filter(session_id=session_id).order_by('-id')[:6]
+        for m in recent_msgs:
+            text = (m.message or '').lower()
+            for ev in events:
+                if ev['title'].lower() in text or ev['slug'] in text or ev['title'].split()[0].lower() in text:
+                    return ev
+    except Exception:
+        pass
+    return None
+
+def detect_event_in_text(text, events):
+    """Detects which event is explicitly named in the text, avoiding category-level queries."""
+    t = text.lower()
+    # If the user is asking about a plural category or browsing, don't pin to a single event
+    if any(phrase in t for phrase in [
+        "what workshops", "workshops available", "any workshop", "workshops are", "list workshops",
+        "what concerts", "concerts available", "any concert", "concerts are", "list concerts",
+        "what conferences", "conferences available", "any conference", "conferences are", "list conferences",
+        "what festivals", "festivals available", "any festival", "festivals are", "list festivals",
+        "what exhibitions", "exhibitions available", "any exhibition", "exhibitions are", "list exhibitions",
+        "what sports", "sports available", "any sport", "all events", "what events"
+    ]):
+        return None
+
+    # Direct title / specific key terms matching
+    for ev in events:
+        title_lower = ev['title'].lower()
+        if title_lower in t:
+            return ev
+        # Specific terms unique to single events
+        if ('neon nights' in t or ('neon' in t and not 'light' in t)) and 'neon' in title_lower:
+            return ev
+        if ('anime expo' in t or 'cosplay' in t or 'otaku' in t) and 'anime' in title_lower:
+            return ev
+        if ('music festival' in t or 'ymca' in t) and 'music' in title_lower:
+            return ev
+        if ('cybertech' in t or 'grand chola' in t) and 'cyber' in title_lower:
+            return ev
+        if ('cosmic' in t or 'lalit kala' in t) and 'cosmic' in title_lower:
+            return ev
+        if ('pro gaming' in t or 'esports' in t or 'valorant' in t) and 'gaming' in title_lower:
+            return ev
+        if ('generative ai workshop' in t or 'genai workshop' in t or 'iit madras' in t) and 'workshop' in title_lower:
+            return ev
+    return None
+
 def generate_assistant_response(user_message, session_id=None):
-    user_msg_lower = user_message.lower().strip()
+    user_msg = user_message.strip()
+    user_msg_lower = user_msg.lower()
     events = get_events_context()
-    
-    # 1. Try Gemini API first (if key is valid and network responds)
-    if GEMINI_API_KEY and not GEMINI_API_KEY.startswith("YOUR_"):
+
+    # 1. Try Gemini API ONLY IF standard Gemini API key (starts with AIzaSy)
+    if GEMINI_API_KEY and GEMINI_API_KEY.startswith("AIzaSy"):
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                
-                system_context = f"""You are Eventix Assistant, the official AI concierge for Eventix (a premier event discovery and ticket reservation platform built in accordance with IEEE 830).
-
-Complete Live Event Catalog:
+                system_context = f"""You are Eventix Assistant, the official AI concierge for Eventix event ticketing platform.
+Live Event Catalog:
 {json.dumps(events, indent=2)}
 
-Eventix Platform Features:
-- 10-Minute Hold Reservation: During checkout, seats are temporarily locked with a 10-minute countdown to guarantee availability.
-- Cancellation & 100% Refund: Users can cancel anytime up to 24 hours before event start under 'My Bookings' for an immediate 100% refund.
-- E-Tickets & QR Codes: Instant verifiable QR codes, unique reference IDs (e.g. EVX-2026-XXXX), printable tickets, and .ics calendar sync.
-- Payment Options: 256-bit SSL encrypted gateway supporting UPI (GPay, PhonePe, Paytm), Credit/Debit Cards, and Net Banking.
-- Roles & Access: Guest (browsing & inquiries), User (booking, holds, history), Admin (real-time analytics, event creation, revenue tracking).
-- Support: 24/7 Priority Hotline at +91 (044) 4800-EVENTIX, email support@eventix.in, headquarters at Eventix Tower, OMR IT Expressway, Chennai.
+Platform Rules:
+- 10-Minute Hold: Seats held with live countdown during checkout.
+- 100% Refund: Cancellations permitted up to 24 hours prior under 'My Bookings'.
+- E-Tickets: Verifiable QR codes and .ics calendar sync.
+- Payments: UPI, Cards, Net Banking (256-bit SSL).
+- Support: +91 (044) 4800-EVENTIX, support@eventix.in.
 
-Guidelines:
-1. Answer all user questions clearly, accurately, and politely.
-2. If asking about ticket prices or booking, mention the exact price in ₹ and venue.
-3. Keep answers concise, natural, and helpful (2-4 sentences)."""
-
-                reply_text = None
-                try:
-                    from google import genai
-                    client = genai.Client(api_key=GEMINI_API_KEY)
-                    resp = client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=[f"{system_context}\n\nUser Question: {user_message}"]
-                    )
-                    reply_text = resp.text
-                except Exception:
-                    import google.generativeai as legacy_genai
-                    legacy_genai.configure(api_key=GEMINI_API_KEY)
-                    model = legacy_genai.GenerativeModel("gemini-1.5-flash")
-                    resp = model.generate_content([system_context, f"User Question: {user_message}"])
-                    reply_text = resp.text
-
-                if reply_text:
-                    # Determine action payload
+Provide concise, friendly, informative answers (2-3 sentences)."""
+                from google import genai
+                client = genai.Client(api_key=GEMINI_API_KEY)
+                resp = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=[f"{system_context}\n\nUser: {user_msg}"]
+                )
+                if resp and resp.text:
+                    reply_text = resp.text.strip()
+                    # Determine action
                     action_type = ""
                     action_payload = {}
                     for ev in events:
-                        if ev["title"].lower() in user_msg_lower or ev["title"].lower() in reply_text.lower():
+                        if ev["title"].lower() in reply_text.lower():
                             action_type = "book_event"
                             action_payload = {
                                 "event_id": ev["id"],
@@ -126,291 +163,383 @@ Guidelines:
                                 "starting_price": ev["starting_price"]
                             }
                             break
-                    
                     return {
                         "reply": reply_text,
                         "action_type": action_type,
                         "action_payload": action_payload
                     }
         except Exception:
-            # Fall through to comprehensive knowledge engine
             pass
 
-    # 2. Comprehensive Eventix Knowledge Engine & NLP Intent Handler
-    # ---------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # 2. Comprehensive Eventix Natural Language & Intent Engine
+    # -------------------------------------------------------------------------
 
-    # A. WEBSITE IDENTITY & PLATFORM OVERVIEW
-    if any(q in user_msg_lower for q in [
-        "what is this website", "about this website", "what does this website do", 
-        "what is eventix", "who made this", "tell me about eventix", "overview", "what can i do here"
-    ]):
+    # Detect if a specific event is mentioned or active in context
+    event_target = detect_event_in_text(user_msg, events)
+    if not event_target:
+        # Check session context for follow-up questions
+        event_target = find_context_event(session_id, events)
+
+    # -------------------------------------------------------------------------
+    # INTENT A: GREETINGS & CASUAL CONVERSATION
+    # -------------------------------------------------------------------------
+    if any(re.search(rf"\b{w}\b", user_msg_lower) for w in ["hi", "hello", "hey", "hola", "sup", "yo", "good morning", "good afternoon", "good evening", "howdy"]):
         return {
-            "reply": "✨ Eventix is an event discovery and ticket reservation web platform developed in accordance with IEEE 830 / ISO/IEC/IEEE 29148 standards.\n\nHere you can:\n• Discover & search trending concerts, anime expos, tech conferences, and festivals.\n• Reserve tickets with a 10-Minute Hold countdown guarantee.\n• Pay securely via UPI, Card, or Net Banking.\n• Instantly download QR-coded E-Tickets & manage 100% refund cancellations.",
+            "reply": "Hey there! 👋 Welcome to Eventix! I'm your AI concierge. I can help you check ticket prices, event timings, venue directions, or guide you through booking and our 100% refund policy.\n\nWhich event would you like to explore today?",
+            "action_type": "quick_options",
+            "action_payload": {}
+        }
+
+    if any(q in user_msg_lower for q in ["how are you", "how's it going", "how do you do", "how are u"]):
+        return {
+            "reply": "I'm doing great, thank you for asking! 🌟 I'm ready to help you discover exciting concerts, expos, and festivals happening across Chennai. What type of event are you in the mood for?",
             "action_type": "view_catalog",
             "action_payload": {"category": "all"}
         }
 
-    # B. HOW TO BOOK / BOOKING PROCESS
-    if any(q in user_msg_lower for q in [
-        "how to book", "how do i book", "booking process", "how does booking work", 
-        "steps to book", "buy tickets", "purchase ticket"
-    ]):
+    if any(q in user_msg_lower for q in ["who are you", "what is your name", "what are you", "what can you do", "introduce yourself"]):
         return {
-            "reply": "Booking on Eventix takes just 4 easy steps ⚡:\n1. Browse events and click 'Book Now'.\n2. Select your ticket tiers & quantities.\n3. Your tickets are held for 10 minutes while you enter your details.\n4. Complete payment via UPI, Card, or Net Banking to receive your instant QR E-Ticket!",
+            "reply": "I'm the Eventix Assistant! 🤖 Here's what I can do for you:\n• Provide instant ticket prices, venue details & timings\n• Reserve tickets with our 10-Minute Hold protection\n• Explain our 100% Full Refund & Cancellation policies\n• Help you find your QR code e-tickets\n• Guide you on UPI & Card payments",
+            "action_type": "quick_options",
+            "action_payload": {}
+        }
+
+    is_asking_question = any(w in user_msg_lower for w in ["?", "how", "what", "where", "when", "who", "which", "can i", "is there", "are there", "why", "refund", "cancel", "hold", "ticket", "book", "pay", "seat", "cost", "price"])
+    if not is_asking_question and re.search(r"\b(thank you|thanks|thx|awesome|great|cool|perfect|got it|nice|ok|okay)\b", user_msg_lower):
+        return {
+            "reply": "You're very welcome! 😊 Feel free to ask if you need anything else or want help reserving tickets. Have a fantastic time at Eventix! ✨",
             "action_type": "view_catalog",
-            "action_payload": {}
+            "action_payload": {"category": "all"}
         }
 
-    # C. 10-MINUTE HOLD RESERVATION MECHANISM
-    if any(q in user_msg_lower for q in ["hold", "ticket hold", "reservation hold", "countdown", "timer", "temporary reservation"]):
+    # -------------------------------------------------------------------------
+    # INTENT B: PLATFORM OVERVIEW & IDENTITY
+    # -------------------------------------------------------------------------
+    if any(q in user_msg_lower for q in [
+        "what is this website", "about this website", "what does this website do",
+        "what is eventix", "tell me about eventix", "platform overview", "what can i do here",
+        "website details", "about event booking", "how does this work"
+    ]):
         return {
-            "reply": "🛡️ The Eventix 10-Minute Hold Reservation guarantees that when you select tickets, they are temporarily locked for you with an active countdown timer. This prevents anyone else from buying your seats while you enter attendee info and finalize payment!",
+            "reply": "✨ Eventix is a modern event discovery and ticket reservation web platform developed in accordance with IEEE 830 standards.\n\nKey Highlights:\n• Live Event Discovery: Browse concerts, anime expos, tech conferences, exhibitions, and esports.\n• 10-Minute Seat Hold: Temporary seat lock with live countdown timer during checkout.\n• 100% Refund Guarantee: Cancel anytime up to 24h prior under 'My Bookings'.\n• Digital QR E-Tickets: Verifiable QR codes for smooth venue check-in.",
+            "action_type": "view_catalog",
+            "action_payload": {"category": "all"}
+        }
+
+    # -------------------------------------------------------------------------
+    # INTENT C: EVENT-SPECIFIC QUESTIONS (WHEN EVENT IS TARGETED)
+    # -------------------------------------------------------------------------
+    if event_target:
+        ev = event_target
+        ev_title = ev["title"]
+        ev_price = ev["starting_price"]
+        ev_venue = ev["venue"]
+        ev_city = ev["city"]
+        ev_date = ev["date"]
+        ev_tiers = ev["tiers"]
+        ev_id = ev["id"]
+
+        # C1. Price / Cost / Tiers Query for this Event
+        if any(w in user_msg_lower for w in ["price", "cost", "ticket", "rate", "fee", "tier", "how much", "cheap", "expensive", "vip", "quota", "pass"]):
+            tier_lines = "\n".join([f"• {t['name']}: {t['price']} ({t['quota']} available)" for t in ev_tiers])
+            return {
+                "reply": f"🎟️ Ticket pricing for {ev_title}:\n• Starting from: {ev_price}\n\nAvailable Categories:\n{tier_lines}\n\nAll tickets include 10-Minute Hold protection and instant QR generation. Would you like to reserve now?",
+                "action_type": "book_event",
+                "action_payload": {
+                    "event_id": ev_id,
+                    "event_title": ev_title,
+                    "starting_price": ev_price
+                }
+            }
+
+        # C2. Timing / Date / Schedule Query for this Event
+        if any(w in user_msg_lower for w in ["time", "timing", "when", "date", "schedule", "hour", "duration", "start", "gates", "day", "month"]):
+            end_info = f" until {ev['end_date']}" if ev.get("end_date") else ""
+            return {
+                "reply": f"⏰ Event Schedule for {ev_title}:\n• Date & Time: {ev_date}{end_info}\n• Venue Gates Open: 1 hour prior for security & QR ticket check-in\n• Venue: {ev_venue}, {ev_city}\n\nWould you like to reserve tickets for this date?",
+                "action_type": "book_event",
+                "action_payload": {
+                    "event_id": ev_id,
+                    "event_title": ev_title,
+                    "starting_price": ev_price
+                }
+            }
+
+        # C3. Venue / Location / Directions / Parking Query for this Event
+        if any(w in user_msg_lower for w in ["where", "venue", "location", "address", "place", "direction", "metro", "reach", "city", "parking", "stadium", "hall", "centre"]):
+            return {
+                "reply": f"📍 Location & Venue Details for {ev_title}:\n• Venue: {ev_venue}\n• City: {ev_city}\n• Date: {ev_date}\n• Access: Dedicated parking available on-site and convenient access via Chennai public transport & metro.\n\nTickets start from {ev_price}. Would you like to book?",
+                "action_type": "book_event",
+                "action_payload": {
+                    "event_id": ev_id,
+                    "event_title": ev_title,
+                    "starting_price": ev_price
+                }
+            }
+
+        # C4. Lineup / Artists / Performers / Highlights / Theme Query for this Event
+        if any(w in user_msg_lower for w in ["who", "artist", "performer", "dj", "singer", "band", "speaker", "guest", "cosplay", "lineup", "theme", "what happens", "about"]):
+            return {
+                "reply": f"✨ Highlights & Experience for {ev_title}:\n{ev['description']}\n\n• Date: {ev_date}\n• Location: {ev_venue}\n• Admission: Starting from {ev_price}\n\nWould you like to reserve your pass?",
+                "action_type": "book_event",
+                "action_payload": {
+                    "event_id": ev_id,
+                    "event_title": ev_title,
+                    "starting_price": ev_price
+                }
+            }
+
+        # C5. Seat Availability / Sold Out Query for this Event
+        if any(w in user_msg_lower for w in ["seats", "left", "availability", "available", "sold out", "quota"]):
+            total_seats = sum(t['quota'] for t in ev_tiers)
+            tier_status = ", ".join([f"{t['name']}: {t['quota']} seats" for t in ev_tiers])
+            return {
+                "reply": f"📊 Seat Availability for {ev_title}:\nCurrently {total_seats} total seats remain across tiers ({tier_status}). Seats are reserved on a first-come, first-served basis with 10-Minute Hold protection.",
+                "action_type": "book_event",
+                "action_payload": {
+                    "event_id": ev_id,
+                    "event_title": ev_title,
+                    "starting_price": ev_price
+                }
+            }
+
+        # C6. Age Limit / Rules / Guidelines for this Event
+        if any(w in user_msg_lower for w in ["age", "kid", "child", "children", "rule", "guideline", "food", "drink", "camera", "photography", "dress"]):
+            return {
+                "reply": f"📋 Entry Guidelines & Venue Policies for {ev_title}:\n• Valid Government ID & digital QR ticket required at check-in\n• Gates open 60 minutes before start time\n• Outside food & beverages are strictly prohibited\n• Age Limit: All ages welcome; children under 5 enter free when accompanied by a ticketed adult.",
+                "action_type": "book_event",
+                "action_payload": {
+                    "event_id": ev_id,
+                    "event_title": ev_title,
+                    "starting_price": ev_price
+                }
+            }
+
+        # C7. Default for this Event: Overview + Booking Prompt
+        return {
+            "reply": f"✨ {ev_title}:\n• Date: {ev_date}\n• Venue: {ev_venue}, {ev_city}\n• Starting Price: {ev_price}\n• Description: {ev['description']}\n\nWould you like to reserve tickets now?",
+            "action_type": "book_event",
+            "action_payload": {
+                "event_id": ev_id,
+                "event_title": ev_title,
+                "starting_price": ev_price
+            }
+        }
+
+    # -------------------------------------------------------------------------
+    # INTENT D: HOW TO BOOK & STEP-BY-STEP RESERVATION
+    # -------------------------------------------------------------------------
+    if any(q in user_msg_lower for q in [
+        "how to book", "how do i book", "booking process", "how does booking work",
+        "steps to book", "buy tickets", "purchase ticket", "how to buy", "book a ticket"
+    ]):
+        return {
+            "reply": "Booking on Eventix is fast and secure (4 easy steps) ⚡:\n1. Choose an event and click 'Book Now'.\n2. Select your ticket tier and quantity.\n3. Your tickets are held for 10 minutes while you enter attendee details.\n4. Pay via UPI, Card, or Net Banking to instantly receive your QR-coded E-Ticket!",
+            "action_type": "view_catalog",
+            "action_payload": {"category": "all"}
+        }
+
+    # -------------------------------------------------------------------------
+    # INTENT E: 10-MINUTE HOLD RESERVATION MECHANISM
+    # -------------------------------------------------------------------------
+    if any(q in user_msg_lower for q in [
+        "hold", "10 minute", "10-minute", "seat lock", "timer", "countdown",
+        "temporary reservation", "why timer", "timer expires", "hold ticket"
+    ]):
+        return {
+            "reply": "🛡️ The 10-Minute Hold Reservation guarantees that when you select tickets, they are temporarily locked exclusively for you with an active countdown timer.\n\n• Nobody else can buy your seats while you enter your info.\n• If the timer expires before payment, seats are released back to public inventory.\n• Once paid, your booking is confirmed permanently!",
             "action_type": "info",
             "action_payload": {}
         }
 
-    # D. REFUND & CANCELLATION POLICY
+    # -------------------------------------------------------------------------
+    # INTENT F: REFUND & CANCELLATION POLICY
+    # -------------------------------------------------------------------------
     if any(q in user_msg_lower for q in [
-        "refund", "cancel", "cancellation", "how to cancel", "money back", 
-        "return ticket", "cancellation policy", "refund policy"
+        "refund", "cancel", "cancellation", "how to cancel", "money back",
+        "return ticket", "cancellation policy", "refund policy", "can i cancel"
     ]):
         return {
-            "reply": "🔄 Eventix 100% Refund Policy:\n• You can cancel any booking up to 24 hours prior to the event start time.\n• Go to 'My Bookings' in the top menu and click 'Cancel Booking'.\n• A 100% full refund is instantly credited back to your original payment method, and ticket inventory is automatically restored.",
+            "reply": "🔄 Eventix 100% Full Refund Policy:\n• Cancel anytime up to 24 hours prior to the event start time.\n• Go to 'My Bookings' in the top menu and click 'Cancel Booking'.\n• 100% of your money is refunded immediately to your original payment method.\n• The ticket quota is automatically restored to the event inventory.",
             "action_type": "navigate",
             "action_payload": {"target": "my_bookings"}
         }
 
-    # E. PAYMENT METHODS & PCI DSS SECURITY
+    # -------------------------------------------------------------------------
+    # INTENT G: PAYMENT METHODS & PCI DSS SECURITY
+    # -------------------------------------------------------------------------
     if any(q in user_msg_lower for q in [
-        "payment", "payment methods", "how to pay", "upi", "credit card", 
-        "debit card", "net banking", "is it safe", "security", "pci dss"
+        "payment", "pay", "how to pay", "upi", "gpay", "google pay", "phonepe",
+        "paytm", "credit card", "debit card", "net banking", "bhim", "safe", "security", "ssl"
     ]):
         return {
-            "reply": "💳 Eventix supports all major payment methods with 256-Bit SSL encryption:\n• Instant UPI & QR Code (Google Pay, PhonePe, Paytm, BHIM)\n• Credit & Debit Cards (Visa, MasterCard, RuPay, Amex)\n• Net Banking across 50+ banks\nAll transactions comply with PCI DSS scope guidelines.",
+            "reply": "💳 Supported Payment Methods (Protected with 256-Bit SSL):\n• Instant UPI & QR: Google Pay, PhonePe, Paytm, BHIM\n• Credit / Debit Cards: Visa, MasterCard, RuPay, American Express\n• Net Banking: 50+ major Indian banks supported\n\nAll transactions comply with PCI DSS industry security standards.",
             "action_type": "info",
             "action_payload": {}
         }
 
-    # F. MY BOOKINGS / VIEW TICKETS / QR CODES
+    # -------------------------------------------------------------------------
+    # INTENT H: MY BOOKINGS / E-TICKETS / QR CODES / CALENDAR
+    # -------------------------------------------------------------------------
     if any(q in user_msg_lower for q in [
-        "my booking", "my ticket", "view ticket", "where is my ticket", 
-        "download ticket", "qr code", "print ticket", "ticket confirmation"
+        "my booking", "my ticket", "view ticket", "where is my ticket",
+        "qr code", "qr", "download ticket", "print ticket", "calendar", "ics", "confirmation"
     ]):
         return {
-            "reply": "🎟️ You can view all your confirmed tickets anytime by clicking 'My Bookings' in the navigation bar! From there, you can view your digital QR code for venue check-in, print your e-ticket, download a .ics calendar invite, or initiate a refund cancellation.",
+            "reply": "🎟️ You can view all confirmed tickets under 'My Bookings' in the top menu!\n\nFrom 'My Bookings', you can:\n• Display your verified QR Code for venue scanner check-in\n• Download .ics Calendar event for Google / Outlook Calendar\n• Print e-ticket confirmation with booking reference (e.g. EVX-2026-XXXX)\n• Request a 100% refund cancellation if plans change.",
             "action_type": "navigate",
             "action_payload": {"target": "my_bookings"}
         }
 
-    # G. FAVORITES / WISHLIST
-    if any(q in user_msg_lower for q in ["favorite", "wishlist", "saved events", "save event", "heart"]):
+    # -------------------------------------------------------------------------
+    # INTENT I: USER ROLES / HOW TO SWITCH ROLES / DEMO LOGIN
+    # -------------------------------------------------------------------------
+    if any(q in user_msg_lower for q in [
+        "role", "switch role", "guest", "demo user", "login", "account",
+        "profile", "admin login", "credentials", "password"
+    ]):
         return {
-            "reply": "❤️ You can save any event by tapping the heart icon on its card! Access all your saved events anytime under 'Favorites' in the top menu to easily track ticket availability and book later.",
-            "action_type": "navigate",
-            "action_payload": {"target": "favorites"}
+            "reply": "👤 Eventix features 3 instant access roles:\n• Guest: Browse events, view trailers & ask the AI Assistant\n• Demo User ('demo_user' / 'password123'): Reserve seats, test checkout & manage bookings\n• Admin ('admin' / 'admin123'): Real-time revenue analytics & event creation\n\n💡 Tip: Click your user profile avatar in the top-right header to switch roles instantly with one click!",
+            "action_type": "info",
+            "action_payload": {}
         }
 
-    # H. ADMIN DASHBOARD & STAFF FEATURES
-    if any(q in user_msg_lower for q in ["admin", "dashboard", "analytics", "organizer", "staff", "create event", "manage event"]):
+    # -------------------------------------------------------------------------
+    # INTENT J: ADMIN DASHBOARD & STAFF OPERATIONS
+    # -------------------------------------------------------------------------
+    if any(q in user_msg_lower for q in [
+        "admin", "dashboard", "analytics", "revenue", "organizer",
+        "staff", "create event", "manage event", "sales"
+    ]):
         return {
-            "reply": "⚙️ Eventix includes a comprehensive Admin Operations Dashboard! Staff members can track real-time revenue, total bookings, and tickets sold, create and edit events with custom pricing and quotas, and manage user bookings. Click your profile avatar to switch to 'Admin Staff'.",
+            "reply": "⚙️ The Eventix Admin Dashboard provides organizers with full operational control:\n• Live Revenue KPI cards & total bookings counter\n• Total tickets sold across categories\n• 'Create Event' modal to publish new events with custom tiers & quotas\n• Real-time booking audit logs\n\nClick below to open the Admin Panel (or switch role to Admin).",
             "action_type": "navigate",
             "action_payload": {"target": "admin"}
         }
 
-    # I. USER ROLES / HOW TO SWITCH ROLES
-    if any(q in user_msg_lower for q in ["role", "switch role", "guest", "demo user", "login", "account", "profile"]):
+    # -------------------------------------------------------------------------
+    # INTENT K: FAVORITES / WISHLIST
+    # -------------------------------------------------------------------------
+    if any(q in user_msg_lower for q in ["favorite", "wishlist", "save event", "saved events", "heart"]):
         return {
-            "reply": "👤 Eventix features 3 distinct roles: Guest (anonymous browsing), User (booking, holds, history), and Admin Staff. You can instantly toggle between these roles anytime by clicking your profile avatar in the top right corner and selecting a test role!",
+            "reply": "❤️ You can save any event to your personal Wishlist by tapping the heart icon on its card! Access all your saved events anytime under 'Favorites' in the top navigation bar to monitor price updates and seat quotas.",
+            "action_type": "navigate",
+            "action_payload": {"target": "favorites"}
+        }
+
+    # -------------------------------------------------------------------------
+    # INTENT L: 24/7 CUSTOMER SUPPORT & CONTACT
+    # -------------------------------------------------------------------------
+    if any(q in user_msg_lower for q in [
+        "contact", "support", "help", "phone", "email", "hotline",
+        "customer care", "office", "address", "call", "complaint"
+    ]):
+        return {
+            "reply": "📞 24/7 Eventix Customer Support Concierge:\n• Priority Hotline: +91 (044) 4800-EVENTIX / 1800-383-6849\n• Email Support: support@eventix.in\n• Corporate Office: Eventix Tower, OMR IT Expressway, Chennai - 600096\n• Live Chat: Available right here 24/7!",
             "action_type": "info",
             "action_payload": {}
         }
 
-    # J. CONTACT & CUSTOMER SUPPORT
-    if any(q in user_msg_lower for q in ["contact", "support", "help", "phone", "email", "hotline", "office", "address", "customer care"]):
+    # -------------------------------------------------------------------------
+    # INTENT M: DISCOUNTS / OFFERS / NEWSLETTER
+    # -------------------------------------------------------------------------
+    if any(q in user_msg_lower for q in ["discount", "offer", "promo", "coupon", "newsletter", "voucher", "deal"]):
         return {
-            "reply": "📞 24/7 Eventix Customer Support Concierge:\n• Hotline: +91 (044) 4800-EVENTIX / 1800-383-6849\n• Email: support@eventix.in\n• Headquarters: Eventix Tower, OMR IT Expressway, Chennai\n• Live Chat: Right here anytime!",
+            "reply": "🎁 Exclusive Eventix Offers:\n• Subscribe to our newsletter in the footer banner below to receive a 10% welcome coupon on your next booking!\n• Look out for 'Early Bird' ticket tiers which offer up to 40% savings compared to standard entry passes.",
             "action_type": "info",
             "action_payload": {}
         }
 
-    # K. EVENT TIMINGS & VENUE CHECK-IN
-    if any(q in user_msg_lower for q in ["timing", "schedule", "gates open", "check in", "when does it start", "venue rules"]):
-        schedules = [f"• {e['title']}: {e['date']} @ {e['venue']}" for e in events[:3]]
+    # -------------------------------------------------------------------------
+    # INTENT N: CATEGORY-SPECIFIC EVENT BROWSING
+    # -------------------------------------------------------------------------
+    if any(w in user_msg_lower for w in ["concert", "music", "sing", "band", "dj", "edm"]):
+        concerts = [e for e in events if e["category"] == "concerts" or "concert" in e["title"].lower()]
+        names = ", ".join([f"{c['title']} ({c['starting_price']})" for c in concerts])
         return {
-            "reply": "⏰ Upcoming Event Timings:\n" + "\n".join(schedules) + "\n\n💡 Note: Venue gates open 1 hour prior to the show for QR code check-in.",
-            "action_type": "info",
-            "action_payload": {}
-        }
-
-    # L. SPECIFIC EVENT NAME MATCHING (PRIORITIZED BEFORE GENERAL CATEGORY MATCHING)
-    # Check Neon Nights
-    if "neon nights" in user_msg_lower or "neon" in user_msg_lower:
-        neon_ev = next((e for e in events if "neon" in e["title"].lower()), None)
-        price_str = neon_ev["starting_price"] if neon_ev else "₹999"
-        ev_id = neon_ev["id"] if neon_ev else 1
-        return {
-            "reply": f"The ticket price for Neon Nights Concert starts from {price_str}. Would you like to book now?",
-            "action_type": "book_event",
-            "action_payload": {
-                "event_id": ev_id,
-                "event_title": "Neon Nights Concert",
-                "starting_price": price_str
-            }
-        }
-
-    # Check Anime Expo
-    if "anime" in user_msg_lower or "anime expo" in user_msg_lower or "cosplay" in user_msg_lower:
-        anime_ev = next((e for e in events if "anime" in e["title"].lower()), None)
-        price_str = anime_ev["starting_price"] if anime_ev else "₹499"
-        ev_id = anime_ev["id"] if anime_ev else 2
-        return {
-            "reply": f"Anime Expo 2026 takes place on Dec 27–28, 2026 at Chennai Trade Centre. Tickets start from {price_str} onwards. Would you like to reserve your pass?",
-            "action_type": "book_event",
-            "action_payload": {
-                "event_id": ev_id,
-                "event_title": "Anime Expo 2026",
-                "starting_price": price_str
-            }
-        }
-
-    # Check Music Festival
-    if "music festival" in user_msg_lower or "ymca" in user_msg_lower:
-        music_ev = next((e for e in events if "music festival" in e["title"].lower()), None)
-        price_str = music_ev["starting_price"] if music_ev else "₹1,499"
-        ev_id = music_ev["id"] if music_ev else 3
-        return {
-            "reply": f"Music Festival 2026 is scheduled for Jan 15, 2027 at YMCA Grounds, Chennai with limited seats starting at {price_str}. Open-air music under the stars with fireworks! Would you like to book?",
-            "action_type": "book_event",
-            "action_payload": {
-                "event_id": ev_id,
-                "event_title": "Music Festival 2026",
-                "starting_price": price_str
-            }
-        }
-
-    # Check CyberTech Summit
-    if "cybertech" in user_msg_lower or "cyber" in user_msg_lower:
-        tech_ev = next((e for e in events if "cybertech" in e["title"].lower()), None)
-        price_str = tech_ev["starting_price"] if tech_ev else "₹1,299"
-        ev_id = tech_ev["id"] if tech_ev else 4
-        return {
-            "reply": f"🎙️ CyberTech Global Summit 2026 brings together 1,000+ tech leaders at ITC Grand Chola, Chennai on Dec 15, 2026. Passes start from {price_str}. Would you like to attend?",
-            "action_type": "book_event",
-            "action_payload": {
-                "event_id": ev_id,
-                "event_title": "CyberTech Global Summit 2026",
-                "starting_price": price_str
-            }
-        }
-
-    # Check Cosmic Light
-    if "cosmic" in user_msg_lower or "light expo" in user_msg_lower or "digital art" in user_msg_lower:
-        art_ev = next((e for e in events if "cosmic" in e["title"].lower()), None)
-        price_str = art_ev["starting_price"] if art_ev else "₹399"
-        ev_id = art_ev["id"] if art_ev else 5
-        return {
-            "reply": f"🎨 Cosmic Light & Digital Art Expo features 360-degree immersive projections and kinetic mirrors at Lalit Kala Akademi, Chennai from Dec 22, 2026. Entry starts from {price_str}. Shall we book your entry pass?",
-            "action_type": "book_event",
-            "action_payload": {
-                "event_id": ev_id,
-                "event_title": "Cosmic Light & Digital Art Expo",
-                "starting_price": price_str
-            }
-        }
-
-    # Check Pro Gaming
-    if "gaming" in user_msg_lower or "esports" in user_msg_lower:
-        game_ev = next((e for e in events if "gaming" in e["title"].lower()), None)
-        price_str = game_ev["starting_price"] if game_ev else "₹699"
-        ev_id = game_ev["id"] if game_ev else 6
-        return {
-            "reply": f"🏆 Pro Gaming & Esports Championship is happening on Jan 05, 2027 at Jawaharlal Nehru Stadium, Chennai for a ₹50 Lakh prize pool! Passes start from {price_str}.",
-            "action_type": "book_event",
-            "action_payload": {
-                "event_id": ev_id,
-                "event_title": "Pro Gaming & Esports Championship",
-                "starting_price": price_str
-            }
-        }
-
-    # Check AI Workshop
-    if "workshop" in user_msg_lower or "ai workshop" in user_msg_lower or "learn" in user_msg_lower:
-        ws_ev = next((e for e in events if "workshop" in e["title"].lower() or "genai" in e["slug"]), None)
-        price_str = ws_ev["starting_price"] if ws_ev else "₹899"
-        ev_id = ws_ev["id"] if ws_ev else 7
-        return {
-            "reply": f"💻 Mastering Generative AI Hands-on Workshop is scheduled for Jan 10, 2027 at IIT Madras Research Park. Hands-on coding with cloud credits, starting from {price_str}.",
-            "action_type": "book_event",
-            "action_payload": {
-                "event_id": ev_id,
-                "event_title": "Mastering Generative AI Hands-on Workshop",
-                "starting_price": price_str
-            }
-        }
-
-    # Any other event by title search
-    for ev in events:
-        if ev["title"].lower() in user_msg_lower or (ev["title"].split()[0].lower() in user_msg_lower and len(ev["title"].split()[0]) > 3):
-            if any(w in user_msg_lower for w in ["price", "ticket", "cost", "how much", "rate", "tier", "vip"]):
-                return {
-                    "reply": f"The ticket price for {ev['title']} starts from {ev['starting_price']}. Available categories: {ev['tiers_str']}. Would you like to book now?",
-                    "action_type": "book_event",
-                    "action_payload": {
-                        "event_id": ev["id"],
-                        "event_title": ev["title"],
-                        "starting_price": ev["starting_price"]
-                    }
-                }
-            if any(w in user_msg_lower for w in ["where", "venue", "location", "address", "place"]):
-                return {
-                    "reply": f"{ev['title']} will take place at {ev['venue']} in {ev['city']}. Date: {ev['date']}. Tickets from {ev['starting_price']}.",
-                    "action_type": "book_event",
-                    "action_payload": {
-                        "event_id": ev["id"],
-                        "event_title": ev["title"],
-                        "starting_price": ev["starting_price"]
-                    }
-                }
-            return {
-                "reply": f"✨ {ev['title']}:\n• Date: {ev['date']}\n• Venue: {ev['venue']}, {ev['city']}\n• Starting from: {ev['starting_price']}\n• Overview: {ev['description']}\nWould you like to reserve tickets?",
-                "action_type": "book_event",
-                "action_payload": {
-                    "event_id": ev["id"],
-                    "event_title": ev["title"],
-                    "starting_price": ev["starting_price"]
-                }
-            }
-
-    # M. GENERAL CATEGORY MATCHING (Concerts, Conferences, Festivals, Exhibitions)
-    if "concert" in user_msg_lower:
-        concerts = [e for e in events if e["category"] == "concerts"]
-        res = ", ".join([f"{c['title']} ({c['starting_price']})" for c in concerts])
-        return {
-            "reply": f"🎵 We have top concert experiences available: {res}! Neon laser light shows, synthwave, and live bands. Which one would you like to explore?",
+            "reply": f"🎵 Featured Concerts in Chennai:\n{names}\n\nExperience neon laser choreography, synthwave, and live bands! Would you like details on Neon Nights Concert?",
             "action_type": "view_catalog",
             "action_payload": {"category": "concerts"}
         }
 
-    if "conference" in user_msg_lower:
+    if any(w in user_msg_lower for w in ["conference", "summit", "keynote", "talk", "tech"]):
         return {
-            "reply": "🎙️ Our featured conference is CyberTech Global Summit 2026 at ITC Grand Chola, Chennai. Keynotes on generative AI, cybersecurity, and cloud architecture.",
+            "reply": "🎙️ Featured Conferences:\n• CyberTech Global Summit 2026 at ITC Grand Chola, Chennai (Dec 15, 2026)\nKeynotes on Generative AI, cloud infrastructure, and cybersecurity defenses starting from ₹1,299.",
             "action_type": "view_catalog",
             "action_payload": {"category": "conferences"}
         }
 
-    # N. GENERAL CATALOG / BROWSE
-    if any(q in user_msg_lower for q in ["all events", "what events", "list events", "show events", "browse", "catalog"]):
-        ev_list = [f"• {e['title']} ({e['date']}, from {e['starting_price']})" for e in events[:5]]
+    if any(w in user_msg_lower for w in ["festival", "fest", "carnival"]):
+        festivals = [e for e in events if e["category"] == "festivals"]
+        items = "\n".join([f"• {f['title']}: {f['date']} at {f['venue']} (from {f['starting_price']})" for f in festivals])
         return {
-            "reply": "Here are our highlight events open for reservation:\n" + "\n".join(ev_list) + "\n\nAsk me about any event, or click below to browse all!",
+            "reply": f"🎆 Upcoming Festivals:\n{items}\n\nWhich festival would you like to explore?",
+            "action_type": "view_catalog",
+            "action_payload": {"category": "festivals"}
+        }
+
+    if any(w in user_msg_lower for w in ["exhibition", "art", "gallery", "light expo", "museum"]):
+        return {
+            "reply": "📦 Featured Exhibitions:\n• Cosmic Light & Digital Art Expo at Lalit Kala Akademi, Chennai\nImmersive 360-degree projection mapping, digital mirrors, and kinetic art from ₹399.",
+            "action_type": "view_catalog",
+            "action_payload": {"category": "exhibitions"}
+        }
+
+    if any(w in user_msg_lower for w in ["workshop", "learn", "course", "coding", "hands-on"]):
+        return {
+            "reply": "💻 Featured Workshops:\n• Mastering Generative AI Hands-on Workshop at IIT Madras Research Park (Jan 10, 2027)\nFull day hands-on coding with multimodal models and cloud credits from ₹899.",
+            "action_type": "view_catalog",
+            "action_payload": {"category": "workshops"}
+        }
+
+    if any(w in user_msg_lower for w in ["sport", "gaming", "esport", "championship", "tournament"]):
+        return {
+            "reply": "🏆 Featured Sports & Gaming:\n• Pro Gaming & Esports Championship at Jawaharlal Nehru Stadium, Chennai (Jan 05, 2027)\n₹50 Lakh prize pool across Valorant, CS2, and FIFA tournaments from ₹699.",
+            "action_type": "view_catalog",
+            "action_payload": {"category": "sports"}
+        }
+
+    # -------------------------------------------------------------------------
+    # INTENT O: CHEAPEST / BUDGET / HIGHEST PRICE / RECOMMENDATIONS
+    # -------------------------------------------------------------------------
+    if any(w in user_msg_lower for w in ["cheapest", "lowest price", "budget", "affordable", "least expensive"]):
+        sorted_ev = sorted(events, key=lambda x: x["starting_price_num"])
+        cheapest = sorted_ev[0]
+        second = sorted_ev[1]
+        return {
+            "reply": f"💰 Most Affordable Events on Eventix:\n1. {cheapest['title']} — starts at only {cheapest['starting_price']} ({cheapest['venue']})\n2. {second['title']} — starts at {second['starting_price']} ({second['venue']})\n\nBoth include full 10-Minute Hold protection and instant QR tickets!",
+            "action_type": "book_event",
+            "action_payload": {
+                "event_id": cheapest["id"],
+                "event_title": cheapest["title"],
+                "starting_price": cheapest["starting_price"]
+            }
+        }
+
+    if any(w in user_msg_lower for w in ["trending", "popular", "top", "hot", "recommend", "best"]):
+        return {
+            "reply": "🌟 Top Trending Events on Eventix right now:\n• 🔥 Neon Nights Concert (Dec 20, Chennai Indoor Stadium, from ₹999)\n• ⭐ Anime Expo 2026 (Dec 27–28, Chennai Trade Centre, from ₹499)\n• 🎆 Music Festival 2026 (Jan 15, YMCA Grounds, from ₹1,499)\n\nWhich one would you like to know more about?",
             "action_type": "view_catalog",
             "action_payload": {"category": "all"}
         }
 
-    # O. DEFAULT COMPREHENSIVE INTELLIGENT CONCIERGE RESPONSE
+    # -------------------------------------------------------------------------
+    # INTENT P: ALL EVENTS / BROWSE CATALOG
+    # -------------------------------------------------------------------------
+    if any(w in user_msg_lower for w in ["all events", "list events", "what events", "browse", "catalog", "events"]):
+        ev_list = [f"• {e['title']} — {e['date']} ({e['starting_price']})" for e in events]
+        return {
+            "reply": f"Here are the {len(events)} events currently live on Eventix:\n" + "\n".join(ev_list) + "\n\nFeel free to ask me for ticket tiers, timings, or venues for any of these!",
+            "action_type": "view_catalog",
+            "action_payload": {"category": "all"}
+        }
+
+    # -------------------------------------------------------------------------
+    # INTENT Q: INTELLIGENT CONTEXTUAL FALLBACK
+    # -------------------------------------------------------------------------
     return {
-        "reply": "I'm your Eventix AI Assistant! You can ask me anything about our platform:\n• Ticket prices & seat availability\n• Event dates, venues & directions\n• How booking & 10-minute hold works\n• 100% Refund and cancellation policy\n• Payment methods & customer support\n\nWhich event or detail can I help you with?",
+        "reply": f"I'm here to help with all details about Eventix! You can ask me:\n• 'What are the ticket prices for Anime Expo?'\n• 'Where is Neon Nights Concert located?'\n• 'How does the 10-minute hold reservation work?'\n• 'What is the refund and cancellation policy?'\n• 'What payment methods do you support?'\n\nWhich detail can I look up for you?",
         "action_type": "quick_options",
         "action_payload": {}
     }
