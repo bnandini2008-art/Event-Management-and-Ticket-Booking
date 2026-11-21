@@ -1,7 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Bot, Minus, X, Paperclip, Send, Ticket, ChevronRight, MessageSquare, Sparkles } from 'lucide-react';
 
-export function EventixAssistant({ onBookEvent, events }) {
+export function EventixAssistant({
+  onBookEvent,
+  events,
+  onOpenMyBookings,
+  onOpenFavorites,
+  onOpenAdmin,
+  onExploreCatalog
+}) {
   const [isOpen, setIsOpen] = useState(true);
   const [isMinimized, setIsMinimized] = useState(false);
   const [inputText, setInputText] = useState('');
@@ -87,16 +94,34 @@ export function EventixAssistant({ onBookEvent, events }) {
 
       const data = await response.json();
       
+      let actionObj = null;
+      if (data.action_type === 'book_event') {
+        actionObj = {
+          type: 'book',
+          title: `Book Tickets · ${data.action_payload?.event_title || 'Event'}`,
+          eventTitle: data.action_payload?.event_title || 'Featured Event',
+          eventId: data.action_payload?.event_id
+        };
+      } else if (data.action_type === 'navigate') {
+        const target = data.action_payload?.target;
+        actionObj = {
+          type: 'navigate',
+          target,
+          title: target === 'my_bookings' ? '🎟️ Open My Bookings' : target === 'favorites' ? '❤️ Open Favorites' : '⚙️ Open Admin Panel'
+        };
+      } else if (data.action_type === 'view_catalog') {
+        actionObj = {
+          type: 'catalog',
+          category: data.action_payload?.category || 'all',
+          title: '⭐ Explore All Events'
+        };
+      }
+
       const botMsg = {
         id: 'bot-' + Date.now(),
         sender: 'assistant',
         text: data.reply,
-        action: data.action_type === 'book_event' ? {
-          type: 'book',
-          title: 'Book Tickets',
-          eventTitle: data.action_payload?.event_title || 'Featured Event',
-          eventId: data.action_payload?.event_id
-        } : null,
+        action: actionObj,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
 
@@ -125,6 +150,12 @@ export function EventixAssistant({ onBookEvent, events }) {
       if (ev) {
         onBookEvent(ev);
       }
+    } else if (action.type === 'navigate') {
+      if (action.target === 'my_bookings' && onOpenMyBookings) onOpenMyBookings();
+      else if (action.target === 'favorites' && onOpenFavorites) onOpenFavorites();
+      else if (action.target === 'admin' && onOpenAdmin) onOpenAdmin();
+    } else if (action.type === 'catalog') {
+      if (onExploreCatalog) onExploreCatalog(action.category || 'all');
     }
   };
 

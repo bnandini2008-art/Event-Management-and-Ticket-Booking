@@ -168,6 +168,13 @@ export function App() {
       <EventixAssistant
         onBookEvent={handleBookNow}
         events={events}
+        onOpenMyBookings={() => setShowMyBookings(true)}
+        onOpenFavorites={() => setShowFavorites(true)}
+        onOpenAdmin={() => setShowAdmin(true)}
+        onExploreCatalog={() => {
+          const el = document.getElementById('trending-section');
+          el?.scrollIntoView({ behavior: 'smooth' });
+        }}
       />
 
       {/* MODALS */}
